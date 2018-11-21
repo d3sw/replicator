@@ -8,8 +8,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/elsevier-core-engineering/replicator/logging"
-	"github.com/elsevier-core-engineering/replicator/replicator/structs"
+	"github.com/d3sw/replicator/logging"
+	"github.com/d3sw/replicator/replicator/structs"
 )
 
 // describeScalingGroup returns the current configuration of a worker pool
@@ -24,12 +24,14 @@ func describeScalingGroup(asgName string,
 		},
 	}
 	resp, err := svc.DescribeAutoScalingGroups(params)
+	if err != nil {
+		return nil, fmt.Errorf("DescribeAutoScalingGroups failed with %v", err)
+	}
 
 	// If we failed to get exactly one ASG, raise an error.
 	if len(resp.AutoScalingGroups) != 1 {
-		err = fmt.Errorf("the attempt to retrieve the current worker pool "+
-			"autoscaling group configuration expected exaclty one result got %v",
-			len(asg.AutoScalingGroups))
+		err = fmt.Errorf("%s configuration expected exaclty one result got %v",
+			asgName, len(resp.AutoScalingGroups))
 	}
 
 	return resp, err
@@ -54,7 +56,7 @@ func getMostRecentInstance(asg, region string) (node string, err error) {
 
 	// Setup AWS EC2 API Session
 	sess := session.Must(session.NewSession())
-	svc := ec2.New(sess, &aws.Config{Region: aws.String(region)})
+	svc := ec2.New(sess, awsConfig(region))
 
 	// Setup query parameters to find instances that are associated with the
 	// specified autoscaling group and are in a running or pending state.

@@ -43,6 +43,10 @@ vet:
 	echo "and fix them if necessary before submitting the code for reviewal."; \
 	fi
 
+deps:
+	@echo "==> Running $@..."
+	@dep ensure
+
 clean:
 	@echo "==> Running $@..."
 	@rm -rf ghb0t

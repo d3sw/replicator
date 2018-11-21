@@ -7,9 +7,9 @@ import (
 	nomadStructs "github.com/hashicorp/nomad/nomad/structs"
 	"github.com/mitchellh/mapstructure"
 
-	"github.com/elsevier-core-engineering/replicator/helper"
-	"github.com/elsevier-core-engineering/replicator/logging"
-	"github.com/elsevier-core-engineering/replicator/replicator/structs"
+	"github.com/d3sw/replicator/helper"
+	"github.com/d3sw/replicator/logging"
+	"github.com/d3sw/replicator/replicator/structs"
 )
 
 // JobWatcher is the main entry point into Replicators process of reading and
@@ -102,7 +102,7 @@ func (c *nomadClient) jobScalingPolicyProcessor(jobID string, scaling *structs.J
 	for _, group := range jobInfo.TaskGroups {
 
 		if group.Update == nil {
-			logging.Error("client/job_scaling_policies: job %s and group %v is missing update stanza",
+			logging.Debug("client/job_scaling_policies: job %s and group %v is missing update stanza",
 				jobID, *group.Name)
 			continue
 		}

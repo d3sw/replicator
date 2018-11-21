@@ -7,30 +7,30 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/elsevier-core-engineering/replicator/helper"
-	"github.com/elsevier-core-engineering/replicator/logging"
-	"github.com/elsevier-core-engineering/replicator/replicator/structs"
+	"github.com/d3sw/replicator/helper"
+	"github.com/d3sw/replicator/logging"
+	"github.com/d3sw/replicator/replicator/structs"
 )
 
-// AwsScalingProvider implements the ScalingProvider interface and provides
+// ScalingProvider implements the ScalingProvider interface and provides
 // a provider that is capable of performing scaling operations against
 // Nomad worker pools running on AWS autoscaling groups.
 //
 // The provider performs verification of each action it takes and provides
 // automatic retry for scale-out operations that fail.
-type AwsScalingProvider struct {
+type ScalingProvider struct {
 	AsgService *autoscaling.AutoScaling
 }
 
-// NewAwsScalingProvider is a factory function that generates a new instance
-// of the AwsScalingProvider.
-func NewAwsScalingProvider(workerPool *structs.WorkerPool) (structs.ScalingProvider, error) {
+// NewScalingProvider is a factory function that generates a new instance
+// of the ScalingProvider.
+func NewScalingProvider(workerPool *structs.WorkerPool) (structs.ScalingProvider, error) {
 	if workerPool.Region == "" {
 		return nil, fmt.Errorf("replicator_region is required for the aws " +
 			"scaling provider")
 	}
 
-	return &AwsScalingProvider{
+	return &ScalingProvider{
 		AsgService: newAwsAsgService(workerPool.Region),
 	}, nil
 }
@@ -44,7 +44,7 @@ func newAwsAsgService(region string) (Session *autoscaling.AutoScaling) {
 
 // Scale is the entry point method for performing scaling operations with
 // the provider.
-func (sp *AwsScalingProvider) Scale(workerPool *structs.WorkerPool,
+func (sp *ScalingProvider) Scale(workerPool *structs.WorkerPool,
 	config *structs.Config, nodeRegistry *structs.NodeRegistry) (err error) {
 
 	switch workerPool.State.ScalingDirection {
@@ -78,7 +78,7 @@ func (sp *AwsScalingProvider) Scale(workerPool *structs.WorkerPool,
 
 // scaleOut is the internal method used to initiate a scale out operation
 // against a worker pool autoscaling group.
-func (sp *AwsScalingProvider) scaleOut(workerPool *structs.WorkerPool) error {
+func (sp *ScalingProvider) scaleOut(workerPool *structs.WorkerPool) error {
 	// Get the current autoscaling group configuration.
 	asg, err := describeScalingGroup(workerPool.Name, sp.AsgService)
 	if err != nil {
@@ -89,7 +89,11 @@ func (sp *AwsScalingProvider) scaleOut(workerPool *structs.WorkerPool) error {
 	// and availability zones.
 	availabilityZones := asg.AutoScalingGroups[0].AvailabilityZones
 	terminationPolicies := asg.AutoScalingGroups[0].TerminationPolicies
-	newCapacity := *asg.AutoScalingGroups[0].DesiredCapacity + int64(1)
+	newCapacity := *asg.AutoScalingGroups[0].DesiredCapacity + int64(workerPool.ScaleFactor)
+	// If newCapacity is greater than the ASG's max then only update to the max allowed
+	if newCapacity > *asg.AutoScalingGroups[0].MaxSize {
+		newCapacity = *asg.AutoScalingGroups[0].MaxSize
+	}
 
 	// Setup autoscaling group input parameters.
 	params := &autoscaling.UpdateAutoScalingGroupInput{
@@ -118,7 +122,7 @@ func (sp *AwsScalingProvider) scaleOut(workerPool *structs.WorkerPool) error {
 
 // scaleIn is the internal method used to initiate a scale in operation
 // against a worker pool autoscaling group.
-func (sp *AwsScalingProvider) scaleIn(workerPool *structs.WorkerPool, config *structs.Config) error {
+func (sp *ScalingProvider) scaleIn(workerPool *structs.WorkerPool, config *structs.Config) error {
 	// If no nodes have been registered as eligible for targeted scaling
 	// operations, throw an error and exit.
 	if len(workerPool.State.EligibleNodes) == 0 {
@@ -135,7 +139,11 @@ func (sp *AwsScalingProvider) scaleIn(workerPool *structs.WorkerPool, config *st
 		workerPool.State.EligibleNodes[:len(workerPool.State.EligibleNodes)-1]
 
 	// Translate the node IP address to the EC2 instance ID.
-	instanceID := translateIptoID(targetNode, workerPool.Region)
+	instanceID, err := translateIptoID(targetNode, workerPool.Region)
+	if err != nil {
+		return fmt.Errorf("core/cluster_scaling: an error occurred while "+
+			"translating node ip to EC2 ID: %v", err)
+	}
 
 	// Setup parameters for the AWS API call to detach the target node
 	// from the worker pool autoscaling group.
@@ -185,7 +193,53 @@ func (sp *AwsScalingProvider) scaleIn(workerPool *structs.WorkerPool, config *st
 	return nil
 }
 
-func (sp *AwsScalingProvider) verifyScaledNode(workerPool *structs.WorkerPool,
+// Remove pulls a node out of the worker ASG and terminates it
+func (sp *ScalingProvider) Remove(workerPool *structs.WorkerPool, nodeAddr string) error {
+	// Translate the node IP address to the EC2 instance ID.
+	instanceID, err := translateIptoID(nodeAddr, workerPool.Region)
+	if err != nil {
+		return fmt.Errorf("cloud/aws: failed to translate node ip "+
+			"to EC2 ID: %v", err)
+	}
+	logging.Debug("cloud/aws: translated %v -> %v", nodeAddr, instanceID)
+	// Setup parameters for the AWS API call to detach the target node
+	// from the worker pool autoscaling group.
+	params := &autoscaling.DetachInstancesInput{
+		AutoScalingGroupName:           aws.String(workerPool.Name),
+		ShouldDecrementDesiredCapacity: aws.Bool(true),
+		InstanceIds: []*string{
+			aws.String(instanceID),
+		},
+	}
+	// Detach the target node from the worker pool autoscaling group.
+	// If this fails, continue on and terminate the instance
+	resp, err := sp.AsgService.DetachInstances(params)
+	if err != nil {
+		// We will continue to terminate the instance even if the detach fails
+		logging.Error("core/cluster_scaling: an error occurred while "+
+			"attempting to detach %v from worker pool %v: %v", instanceID,
+			workerPool.Name, err)
+	} else {
+		// Monitor the scaling activity result.
+		if *resp.Activities[0].StatusCode != autoscaling.ScalingActivityStatusCodeSuccessful {
+			err = checkClusterScalingResult(resp.Activities[0].ActivityId, sp.AsgService)
+			if err != nil {
+				return err
+			}
+			logging.Debug("core/cluster_scaling: successfully detached instance %v", instanceID)
+		}
+	}
+	// Once the node has been detached from the worker pool autoscaling group,
+	// terminate the instance.
+	err = terminateInstance(instanceID, workerPool.Region)
+	if err != nil {
+		return fmt.Errorf("an error occurred while attempting to terminate "+
+			"instance %v from worker pool %v", instanceID, workerPool.Name)
+	}
+	return nil
+}
+
+func (sp *ScalingProvider) verifyScaledNode(workerPool *structs.WorkerPool,
 	config *structs.Config, nodeRegistry *structs.NodeRegistry) (ok bool) {
 
 	// Setup reference to Consul client.
@@ -256,12 +310,16 @@ func (sp *AwsScalingProvider) verifyScaledNode(workerPool *structs.WorkerPool,
 // after a failed scaling event is detected. The node is detached and
 // terminated unless the retry threshold has been reached, in that case the
 // node is left in a detached state for troubleshooting.
-func (sp *AwsScalingProvider) failedEventCleanup(workerNode string,
+func (sp *ScalingProvider) failedEventCleanup(workerNode string,
 	workerPool *structs.WorkerPool) (err error) {
 
 	// Translate the IP address of the most recently launched node to
 	// EC2 instance ID so the node can be terminated or detached.
-	instanceID := translateIptoID(workerNode, workerPool.Region)
+	instanceID, err := translateIptoID(workerNode, workerPool.Region)
+	if err != nil {
+		return fmt.Errorf("an error occured while attempting to "+
+			"translate the node ip to EC2 ID: %v", err)
+	}
 
 	// If the retry threshold defined for the worker pool has been reached, we
 	// will detach the instance from the autoscaling group and decrement the
@@ -291,7 +349,7 @@ func (sp *AwsScalingProvider) failedEventCleanup(workerNode string,
 // SafetyCheck is an exported method that provides provider specific safety
 // checks that will be used by core runner to determine if a scaling operation
 // can be safely initiated.
-func (sp *AwsScalingProvider) SafetyCheck(workerPool *structs.WorkerPool) bool {
+func (sp *ScalingProvider) SafetyCheck(workerPool *structs.WorkerPool) bool {
 	// Retrieve ASG configuration so we can check min/max/desired counts
 	// against the desired scaling action.
 	asg, err := describeScalingGroup(workerPool.Name, sp.AsgService)
