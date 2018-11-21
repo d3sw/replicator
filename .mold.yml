@@ -3,7 +3,11 @@ build:
   cache: true
   commands:
     - apt-get update
+    - apt-get install -y zip
+    - wget https://releases.hashicorp.com/consul/1.4.0/consul_1.4.0_linux_amd64.zip -P /tmp
+    - unzip -o /tmp/consul_1.4.0_linux_amd64.zip -d /bin
     - go get -u github.com/mitchellh/gox
+    - make test
     - make release
   workdir: "/go/src/github.com/d3sw/replicator"
   environment: []

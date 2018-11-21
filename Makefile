@@ -26,7 +26,7 @@ lint:
 	@echo "==> Running $@..."
 	@golint ./... | grep -v vendor | tee /dev/stderr
 
-test: fmt lint vet
+test:
 	@echo "==> Running $@..."
 	@go test -v -tags "$(BUILDTAGS) cgo" $(shell go list ./... | grep -v vendor)
 
@@ -43,7 +43,7 @@ vet:
 	echo "and fix them if necessary before submitting the code for reviewal."; \
 	fi
 
-deps:
+deps: fmt lint vet
 	@echo "==> Running $@..."
 	@dep ensure
 
